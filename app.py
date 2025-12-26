@@ -3,42 +3,31 @@ import pandas as pd
 import glob
 from pathlib import Path
 import os
+import sys
 
-# ===== folder picker (Windows / local) =====
-import tkinter as tk
-from tkinter import filedialog
+st.set_page_config(layout="wide")
+st.title("ОС ⇄ IT merge по инвентарному номеру")
+
+# =====================================================
+# ENV CHECK: can we use tkinter?
+# =====================================================
+USE_TK = False
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+    USE_TK = True
+except Exception:
+    USE_TK = False
 
 
 def pick_folder():
+    if not USE_TK:
+        return None
     root = tk.Tk()
     root.withdraw()
     folder = filedialog.askdirectory()
     root.destroy()
     return folder
-
-
-# ================== STREAMLIT ==================
-st.set_page_config(layout="wide")
-st.title("ОС ⇄ IT merge по инвентарному номеру")
-
-
-# ================== HELPERS ==================
-def list_xlsx_files(folder: str):
-    files = []
-    for p in glob.glob(os.path.join(folder, "*.xlsx")):
-        name = Path(p).name
-        if name.startswith("~$"):
-            continue
-        files.append(p)
-    return sorted(files)
-
-
-def read_headers(file_path: str):
-    try:
-        df0 = pd.read_excel(file_path, nrows=0)
-        return [str(c).strip() for c in df0.columns]
-    except Exception:
-        return []
 
 
 def norm_key(x):
@@ -47,66 +36,90 @@ def norm_key(x):
     return str(x).strip()
 
 
-# ================== STEP 1 ==================
-st.subheader("1) Выбор папки с IT-файлами и места сохранения")
+# =====================================================
+# STEP 1 — SOURCE FILES
+# =====================================================
+st.subheader("1) Источник IT-данных")
 
-if "source_dir" not in st.session_state:
-    st.session_state.source_dir = ""
+it_files = []
 
-colA, colB, colC = st.columns([2, 2, 2])
+if USE_TK:
+    st.caption("Режим: локальный (выбор папки)")
+    if "source_dir" not in st.session_state:
+        st.session_state.source_dir = ""
 
-with colA:
-    if st.button("📂 Выбрать папку с IT-файлами"):
-        selected = pick_folder()
-        if selected:
-            st.session_state.source_dir = selected
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("📂 Выбрать папку"):
+            selected = pick_folder()
+            if selected:
+                st.session_state.source_dir = selected
 
-with colB:
-    out_dir = st.text_input("Папка для сохранения результата", value=".")
+    with col2:
+        source_dir = st.text_input(
+            "Папка с IT-файлами (.xlsx)",
+            value=st.session_state.source_dir,
+            disabled=True
+        )
 
-with colC:
-    out_name = st.text_input("Имя итогового файла", value="os_merge_result.xlsx")
+    if not source_dir or not os.path.isdir(source_dir):
+        st.warning("Выбери существующую папку")
+        st.stop()
 
-source_dir = st.text_input(
-    "Папка с IT-файлами (.xlsx)",
-    value=st.session_state.source_dir,
-    disabled=True
-)
+    it_files = [
+        p for p in glob.glob(os.path.join(source_dir, "*.xlsx"))
+        if not Path(p).name.startswith("~$")
+    ]
 
-out_path = str(Path(out_dir) / out_name)
+else:
+    st.caption("Режим: Cloud / Linux (загрузка файлов)")
+    uploaded_files = st.file_uploader(
+        "Загрузи IT-файлы (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=True
+    )
 
-if not source_dir or not os.path.isdir(source_dir):
-    st.warning("Выбери существующую папку с IT-файлами")
-    st.stop()
+    if not uploaded_files:
+        st.stop()
 
-it_files = list_xlsx_files(source_dir)
-st.write(f"Найдено IT-файлов: **{len(it_files)}**")
+    it_files = uploaded_files
 
+
+st.write(f"IT-файлов: **{len(it_files)}**")
 if not it_files:
-    st.error("В выбранной папке нет .xlsx файлов")
+    st.error("Нет файлов для обработки")
     st.stop()
 
 
-# ================== STEP 2 ==================
-st.subheader("2) Проверка уникальных колонок (из IT-файлов)")
+# =====================================================
+# STEP 2 — SCAN UNIQUE COLUMNS
+# =====================================================
+st.subheader("2) Проверка уникальных колонок")
 
 unique_cols = set()
 
-with st.spinner("Сканирую заголовки..."):
-    for f in it_files:
-        cols = read_headers(f)
-        unique_cols.update(cols)
+for f in it_files:
+    try:
+        if USE_TK:
+            df0 = pd.read_excel(f, nrows=0)
+        else:
+            df0 = pd.read_excel(f, nrows=0)
+        unique_cols.update([str(c).strip() for c in df0.columns])
+    except Exception:
+        pass
 
 unique_cols = sorted([c for c in unique_cols if c and c.lower() != "nan"])
 
-st.write(f"Уникальных колонок найдено: **{len(unique_cols)}**")
-st.dataframe(pd.DataFrame({"column": unique_cols}), height=320)
+st.write(f"Уникальных колонок: **{len(unique_cols)}**")
+st.dataframe(pd.DataFrame({"column": unique_cols}), height=300)
 
 
-# ================== STEP 3 ==================
-st.subheader("3) Добавь целевой файл (Ведомость ОС)")
-target_file = st.file_uploader("Целевой Excel (.xlsx)", type=["xlsx"])
+# =====================================================
+# STEP 3 — TARGET FILE
+# =====================================================
+st.subheader("3) Целевая ведомость ОС")
 
+target_file = st.file_uploader("Ведомость ОС (.xlsx)", type=["xlsx"])
 if not target_file:
     st.stop()
 
@@ -117,34 +130,35 @@ st.write(f"Колонок в целевом файле: **{len(base_cols)}**")
 st.dataframe(pd.DataFrame({"base_columns": base_cols}), height=240)
 
 
-# ================== STEP 4 ==================
-st.subheader("4) Выбор: по чему мэчим и что добавляем в конец")
+# =====================================================
+# STEP 4 — MERGE SETTINGS
+# =====================================================
+st.subheader("4) Настройки объединения")
 
-colK1, colK2 = st.columns(2)
-
-with colK1:
+colA, colB = st.columns(2)
+with colA:
     base_key = st.selectbox("Ключ в целевом файле", options=base_cols)
-
-with colK2:
+with colB:
     it_key = st.selectbox("Ключ в IT-файлах", options=unique_cols)
 
 add_cols = st.multiselect(
-    "Колонки, которые добавить в конец (любое количество)",
+    "Колонки для добавления в конец (любое количество)",
     options=[c for c in unique_cols if c != it_key],
     default=[]
 )
 
 if not add_cols:
-    st.warning("Выбери хотя бы одну колонку для добавления")
+    st.warning("Выбери хотя бы одну колонку")
     st.stop()
 
 
-# ================== STEP 5 ==================
-st.subheader("5) Запуск объединения")
+# =====================================================
+# STEP 5 — RUN
+# =====================================================
+st.subheader("5) Выполнить объединение")
 
 if st.button("MATCH", type="primary"):
 
-    # --- BASE ---
     base = pd.read_excel(target_file)
     base = base.rename(columns={base_key: "inv_key"})
     base["inv_key"] = base["inv_key"].apply(norm_key)
@@ -153,41 +167,35 @@ if st.button("MATCH", type="primary"):
     it_frames = []
     unmatched_frames = []
 
-    # --- IT FILES ---
-    with st.spinner("Читаю IT-файлы и собираю данные..."):
-        for f in it_files:
-            try:
-                df = pd.read_excel(f)
-            except Exception as e:
-                st.warning(f"Не прочитал {Path(f).name}: {e}")
-                continue
+    for f in it_files:
+        try:
+            df = pd.read_excel(f)
+        except Exception as e:
+            st.warning(f"Не прочитал файл: {e}")
+            continue
 
-            if it_key not in df.columns:
-                continue
+        if it_key not in df.columns:
+            continue
 
-            df = df.rename(columns={it_key: "inv_key"})
-            df["inv_key"] = df["inv_key"].apply(norm_key)
+        df = df.rename(columns={it_key: "inv_key"})
+        df["inv_key"] = df["inv_key"].apply(norm_key)
 
-            # UNMATCHED
-            um = df[~df["inv_key"].isin(base_keys)].copy()
-            if not um.empty:
-                um["Источник"] = Path(f).name
-                unmatched_frames.append(um)
+        um = df[~df["inv_key"].isin(base_keys)].copy()
+        if not um.empty:
+            um["Источник"] = Path(getattr(f, "name", f)).name
+            unmatched_frames.append(um)
 
-            # MATCHED (берём только существующие колонки)
-            existing = [c for c in add_cols if c in df.columns]
-            if not existing:
-                continue
+        existing = [c for c in add_cols if c in df.columns]
+        if not existing:
+            continue
 
-            m = df[df["inv_key"].isin(base_keys)][["inv_key"] + existing]
-            if not m.empty:
-                it_frames.append(m)
+        m = df[df["inv_key"].isin(base_keys)][["inv_key"] + existing]
+        it_frames.append(m)
 
     if not it_frames:
-        st.error("Совпадений по ключу нет или выбранные колонки отсутствуют")
+        st.error("Нет совпадений по ключу")
         st.stop()
 
-    # --- COLLAPSE ---
     it_all = pd.concat(it_frames, ignore_index=True)
     it_all = (
         it_all
@@ -195,32 +203,22 @@ if st.button("MATCH", type="primary"):
         .agg(lambda s: s.dropna().iloc[0] if not s.dropna().empty else None)
     )
 
-    # --- MERGE ---
     result = base.merge(it_all, on="inv_key", how="left")
+    unmatched_df = pd.concat(unmatched_frames, ignore_index=True) if unmatched_frames else pd.DataFrame()
 
-    unmatched_df = (
-        pd.concat(unmatched_frames, ignore_index=True)
-        if unmatched_frames else pd.DataFrame()
-    )
-
-    # --- SAVE ---
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+    out_name = "os_merge_result.xlsx"
+    with pd.ExcelWriter(out_name, engine="openpyxl") as writer:
         result.to_excel(writer, sheet_name="MATCHED", index=False)
         unmatched_df.to_excel(writer, sheet_name="UNMATCHED", index=False)
 
-    st.success(f"Готово. Файл сохранён: {out_path}")
+    st.success("Готово")
 
-    st.subheader("Превью MATCHED")
-    st.dataframe(result.head(200), height=350)
+    st.dataframe(result.head(200), height=300)
 
-    st.subheader("Превью UNMATCHED")
-    st.dataframe(unmatched_df.head(200), height=350)
-
-    with open(out_path, "rb") as f:
+    with open(out_name, "rb") as f:
         st.download_button(
-            "Скачать Excel (MATCHED + UNMATCHED)",
+            "Скачать Excel",
             data=f,
-            file_name=Path(out_path).name,
+            file_name=out_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
